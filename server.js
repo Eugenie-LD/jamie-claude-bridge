@@ -5,12 +5,14 @@ const path = require('path');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
-
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-// Base de données simple : un fichier JSON qui accumule tous les meetings
-const DB_FILE = path.join(__dirname, 'meetings_history.json');
-
+// Vérification que la requête vient bien de Jamie
+app.use('/webhook', (req, res, next) => {
+  const jamieKey = req.headers['x-jamie-api-key'];
+  if (jamieKey !== process.env.JAMIE_API_KEY) {
+    return res.status(401).json({ error: 'Non autorisé' });
+  }
+  next();
+});
 function loadHistory() {
   if (!fs.existsSync(DB_FILE)) return [];
   try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); }
