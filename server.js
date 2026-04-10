@@ -2,21 +2,14 @@ const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs');
 const path = require('path');
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend');
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
 const DB_FILE = path.join(__dirname, 'meetings_history.json');
-
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.ZOHO_EMAIL,
-    pass: process.env.ZOHO_PASSWORD,
-  },
-});
 
 app.use('/webhook', (req, res, next) => {
   const jamieKey = req.headers['x-jamie-api-key'];
@@ -66,8 +59,8 @@ async function sendEmailAsync(meetingData, analysis) {
       day: 'numeric', month: 'long', year: 'numeric'
     });
 
-    await transporter.sendMail({
-      from: `"Jamie × Claude" <${process.env.ZOHO_EMAIL}>`,
+    await resend.emails.send({
+      from: 'Jamie × Claude <onboarding@resend.dev>',
       to: process.env.RECIPIENT_EMAIL,
       subject: `📋 Analyse meeting : ${meetingData.title} — ${dateFormatted}`,
       html: `
@@ -80,7 +73,6 @@ async function sendEmailAsync(meetingData, analysis) {
             <p style="margin: 8px 0; font-size: 13px; color: #666;">
               👥 ${Array.isArray(meetingData.attendees) ? meetingData.attendees.join(', ') : (meetingData.attendees || 'Non renseigné')}
               &nbsp;·&nbsp; ⏱️ ${meetingData.duration || 'Durée non renseignée'}
-              &nbsp;·&nbsp; 🗂️ Meeting #${loadHistory().length} en base
             </p>
           </div>
           <div style="background: white; padding: 24px; border-radius: 0 0 8px 8px; border: 1px solid #e0e0e0;">
@@ -92,9 +84,9 @@ async function sendEmailAsync(meetingData, analysis) {
         </div>
       `,
     });
-    console.log('📧 Email envoyé à', process.env.RECIPIENT_EMAIL);
+    console.log('📧 Email envoyé via Resend à', process.env.RECIPIENT_EMAIL);
   } catch (err) {
-    console.error('❌ Erreur email (non bloquante):', err.message);
+    console.error('❌ Erreur email Resend:', err.message);
   }
 }
 
