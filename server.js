@@ -5,6 +5,12 @@ const path = require('path');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
+
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+
+// ← MANQUAIT : déclaration de DB_FILE
+const DB_FILE = path.join(__dirname, 'meetings_history.json');
+
 // Vérification que la requête vient bien de Jamie
 app.use('/webhook', (req, res, next) => {
   const jamieKey = req.headers['x-jamie-api-key'];
@@ -13,6 +19,7 @@ app.use('/webhook', (req, res, next) => {
   }
   next();
 });
+
 function loadHistory() {
   if (!fs.existsSync(DB_FILE)) return [];
   try { return JSON.parse(fs.readFileSync(DB_FILE, 'utf8')); }
@@ -26,7 +33,6 @@ function saveToHistory(meeting) {
   return history;
 }
 
-// Contexte LIFE injecté automatiquement dans chaque analyse
 const LIFE_CONTEXT = `
 Tu es l'assistant marketing stratégique d'Eugénie, Strategic Marketing Lead chez LIFE, 
 une ONG française présente dans 25+ pays avec 4 piliers : 
@@ -42,13 +48,11 @@ Objectif permanent : augmenter l'AOV et le ROI des campagnes.
 Les donateurs sont appelés "LifeChangers".
 `;
 
-// Endpoint principal appelé par Jamie
 app.post('/webhook', async (req, res) => {
   try {
     const payload = req.body;
     console.log('📩 Meeting reçu de Jamie:', JSON.stringify(payload).slice(0, 200));
 
-    // Jamie peut envoyer dans différents formats — on normalise
     const meetingData = {
       title: payload.title || payload.meeting_title || payload.name || 'Meeting sans titre',
       date: payload.date || payload.created_at || new Date().toISOString(),
@@ -58,16 +62,13 @@ app.post('/webhook', async (req, res) => {
       duration: payload.duration || '',
     };
 
-    // On charge les 5 derniers meetings pour donner du contexte à Claude
     const history = loadHistory();
     const recentMeetings = history.slice(-5).map(m => 
       `[${m.date?.slice(0,10)}] ${m.title}: ${m.summary?.slice(0,300) || 'pas de résumé'}`
     ).join('\n');
 
-    // On sauvegarde ce meeting
     saveToHistory(meetingData);
 
-    // Prompt envoyé à Claude
     const prompt = `
 ${LIFE_CONTEXT}
 
@@ -117,10 +118,8 @@ Un bloc prêt à copier-coller pour créer une tâche ou une note de projet.
     });
 
     const analysis = message.content[0].text;
-
     console.log('✅ Analyse générée avec succès');
 
-    // Réponse retournée à Jamie (et loggée)
     res.json({
       success: true,
       meeting_title: meetingData.title,
@@ -134,7 +133,6 @@ Un bloc prêt à copier-coller pour créer une tâche ou une note de projet.
   }
 });
 
-// Endpoint pour consulter l'historique
 app.get('/history', (req, res) => {
   const history = loadHistory();
   res.json({ 
@@ -143,7 +141,6 @@ app.get('/history', (req, res) => {
   });
 });
 
-// Health check
 app.get('/', (req, res) => {
   res.json({ status: 'Jamie-Claude Bridge opérationnel ✅', meetings_stored: loadHistory().length });
 });
