@@ -13,8 +13,8 @@ const DB_FILE = path.join(__dirname, 'meetings_history.json');
 // Config email Zoho
 const transporter = nodemailer.createTransport({
   host: 'smtp.zoho.eu',
-  port: 465,
-  secure: true,
+  port: 587,
+  secure: false,
   auth: {
     user: process.env.ZOHO_EMAIL,
     pass: process.env.ZOHO_PASSWORD,
