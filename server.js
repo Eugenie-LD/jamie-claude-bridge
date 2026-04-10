@@ -2,16 +2,25 @@ const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk');
 const fs = require('fs');
 const path = require('path');
+const nodemailer = require('nodemailer');
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
-
-// ← MANQUAIT : déclaration de DB_FILE
 const DB_FILE = path.join(__dirname, 'meetings_history.json');
 
-// Vérification que la requête vient bien de Jamie
+// Config email Zoho
+const transporter = nodemailer.createTransport({
+  host: 'smtp.zoho.eu',
+  port: 465,
+  secure: true,
+  auth: {
+    user: process.env.ZOHO_EMAIL,
+    pass: process.env.ZOHO_PASSWORD,
+  },
+});
+
 app.use('/webhook', (req, res, next) => {
   const jamieKey = req.headers['x-jamie-api-key'];
   if (jamieKey !== process.env.JAMIE_API_KEY) {
@@ -120,10 +129,51 @@ Un bloc prêt à copier-coller pour créer une tâche ou une note de projet.
     const analysis = message.content[0].text;
     console.log('✅ Analyse générée avec succès');
 
+    // Formatage HTML de l'analyse pour l'email
+    const analysisHtml = analysis
+      .replace(/### (.*)/g, '<h3>$1</h3>')
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\n/g, '<br>');
+
+    const dateFormatted = new Date(meetingData.date).toLocaleDateString('fr-FR', {
+      day: 'numeric', month: 'long', year: 'numeric'
+    });
+
+    // Envoi de l'email
+    await transporter.sendMail({
+      from: `"Jamie × Claude" <${process.env.ZOHO_EMAIL}>`,
+      to: process.env.RECIPIENT_EMAIL,
+      subject: `📋 Analyse meeting : ${meetingData.title} — ${dateFormatted}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto; color: #333;">
+          <div style="background: #1a1a2e; padding: 24px; border-radius: 8px 8px 0 0;">
+            <h2 style="color: white; margin: 0;">📋 Analyse de meeting</h2>
+            <p style="color: #aaa; margin: 8px 0 0;">${meetingData.title} · ${dateFormatted}</p>
+          </div>
+          <div style="background: #f9f9f9; padding: 8px 24px; border-left: 4px solid #e0e0e0;">
+            <p style="margin: 8px 0; font-size: 13px; color: #666;">
+              👥 ${Array.isArray(meetingData.attendees) ? meetingData.attendees.join(', ') : (meetingData.attendees || 'Non renseigné')}
+              &nbsp;·&nbsp; ⏱️ ${meetingData.duration || 'Durée non renseignée'}
+              &nbsp;·&nbsp; 🗂️ Meeting #${loadHistory().length} en base
+            </p>
+          </div>
+          <div style="background: white; padding: 24px; border-radius: 0 0 8px 8px; border: 1px solid #e0e0e0;">
+            ${analysisHtml}
+          </div>
+          <p style="text-align: center; font-size: 11px; color: #bbb; margin-top: 16px;">
+            Généré automatiquement par Jamie × Claude Bridge · LIFE
+          </p>
+        </div>
+      `,
+    });
+
+    console.log('📧 Email envoyé à', process.env.RECIPIENT_EMAIL);
+
     res.json({
       success: true,
       meeting_title: meetingData.title,
       analysis: analysis,
+      email_sent: true,
       meetings_in_history: loadHistory().length
     });
 
