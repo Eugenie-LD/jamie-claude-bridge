@@ -1,17 +1,27 @@
 const express = require('express');
 const Anthropic = require('@anthropic-ai/sdk');
+const { Resend } = require('resend');
 const fs = require('fs');
 const path = require('path');
-const { Resend } = require('resend');
-const resend = new Resend(process.env.RESEND_API_KEY);
 
 const app = express();
 app.use(express.json({ limit: '10mb' }));
 
 const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const resend = new Resend(process.env.RESEND_API_KEY);
 const DB_FILE = path.join(__dirname, 'meetings_history.json');
 
+// Vérification que la requête vient bien de Jamie
 app.use('/webhook', (req, res, next) => {
+  const jamieKey = req.headers['x-jamie-api-key'];
+  if (jamieKey !== process.env.JAMIE_API_KEY) {
+    return res.status(401).json({ error: 'Non autorisé' });
+  }
+  next();
+});
+
+// Même vérification pour la route manuelle
+app.use('/manual', (req, res, next) => {
   const jamieKey = req.headers['x-jamie-api-key'];
   if (jamieKey !== process.env.JAMIE_API_KEY) {
     return res.status(401).json({ error: 'Non autorisé' });
@@ -47,54 +57,9 @@ Objectif permanent : augmenter l'AOV et le ROI des campagnes.
 Les donateurs sont appelés "LifeChangers".
 `;
 
-// Fonction email en arrière-plan — ne bloque plus la réponse
-async function sendEmailAsync(meetingData, analysis) {
+// Fonction qui traite le meeting (analyse Claude + email)
+async function processMeeting(payload) {
   try {
-    const analysisHtml = analysis
-      .replace(/### (.*)/g, '<h3>$1</h3>')
-      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
-      .replace(/\n/g, '<br>');
-
-    const dateFormatted = new Date(meetingData.date).toLocaleDateString('fr-FR', {
-      day: 'numeric', month: 'long', year: 'numeric'
-    });
-
-    await resend.emails.send({
-      from: 'Jamie × Claude <onboarding@resend.dev>',
-      to: process.env.RECIPIENT_EMAIL,
-      subject: `📋 Analyse meeting : ${meetingData.title} — ${dateFormatted}`,
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto; color: #333;">
-          <div style="background: #1a1a2e; padding: 24px; border-radius: 8px 8px 0 0;">
-            <h2 style="color: white; margin: 0;">📋 Analyse de meeting</h2>
-            <p style="color: #aaa; margin: 8px 0 0;">${meetingData.title} · ${dateFormatted}</p>
-          </div>
-          <div style="background: #f9f9f9; padding: 8px 24px; border-left: 4px solid #e0e0e0;">
-            <p style="margin: 8px 0; font-size: 13px; color: #666;">
-              👥 ${Array.isArray(meetingData.attendees) ? meetingData.attendees.join(', ') : (meetingData.attendees || 'Non renseigné')}
-              &nbsp;·&nbsp; ⏱️ ${meetingData.duration || 'Durée non renseignée'}
-            </p>
-          </div>
-          <div style="background: white; padding: 24px; border-radius: 0 0 8px 8px; border: 1px solid #e0e0e0;">
-            ${analysisHtml}
-          </div>
-          <p style="text-align: center; font-size: 11px; color: #bbb; margin-top: 16px;">
-            Généré automatiquement par Jamie × Claude Bridge · LIFE
-          </p>
-        </div>
-      `,
-    });
-    console.log('📧 Email envoyé via Resend à', process.env.RECIPIENT_EMAIL);
-  } catch (err) {
-    console.error('❌ Erreur email Resend:', err.message);
-  }
-}
-
-app.post('/webhook', async (req, res) => {
-  try {
-    const payload = req.body;
-    console.log('📩 Meeting reçu de Jamie:', JSON.stringify(payload).slice(0, 200));
-
     const meetingData = {
       title: payload.title || payload.meeting_title || payload.name || 'Meeting sans titre',
       date: payload.date || payload.created_at || new Date().toISOString(),
@@ -105,8 +70,8 @@ app.post('/webhook', async (req, res) => {
     };
 
     const history = loadHistory();
-    const recentMeetings = history.slice(-5).map(m => 
-      `[${m.date?.slice(0,10)}] ${m.title}: ${m.summary?.slice(0,300) || 'pas de résumé'}`
+    const recentMeetings = history.slice(-5).map(m =>
+      `[${m.date?.slice(0, 10)}] ${m.title}: ${m.summary?.slice(0, 300) || 'pas de résumé'}`
     ).join('\n');
 
     saveToHistory(meetingData);
@@ -133,14 +98,24 @@ ${meetingData.transcript?.slice(0, 8000) || 'Non disponible'}
 
 ---
 
+## Analyse demandée
+
 Produis une synthèse structurée en français avec :
 
 ### 🎯 Points clés (5 max)
+Les informations essentielles à retenir.
+
 ### ✅ Décisions prises
+Ce qui a été acté. Si rien, écris "Aucune décision formelle".
+
 ### 🚀 Next steps & actions
 Format : **[Responsable]** — Action — Deadline si mentionnée
+
 ### 🔗 Liens avec les projets LIFE en cours
+Connexions pertinentes avec les campagnes, outils ou équipes connus.
+
 ### 📋 Format Notion/Asana
+Un bloc prêt à copier-coller pour créer une tâche ou une note de projet.
 `;
 
     const message = await client.messages.create({
@@ -150,29 +125,116 @@ Format : **[Responsable]** — Action — Deadline si mentionnée
     });
 
     const analysis = message.content[0].text;
-    console.log('✅ Analyse générée');
+    console.log('✅ Analyse générée avec succès pour:', meetingData.title);
 
-    // Réponse immédiate à Jamie — n'attend PAS l'email
-    res.json({
-      success: true,
-      meeting_title: meetingData.title,
-      analysis: analysis,
-      meetings_in_history: loadHistory().length
+    // Envoi email
+    await sendEmail(meetingData, analysis);
+
+    return { success: true, meeting_title: meetingData.title, analysis };
+  } catch (error) {
+    console.error('❌ Erreur traitement meeting:', error.message);
+    return { success: false, error: error.message };
+  }
+}
+
+// Fonction email via Resend
+async function sendEmail(meetingData, analysis) {
+  try {
+    const analysisHtml = analysis
+      .replace(/### (.*)/g, '<h3>$1</h3>')
+      .replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>')
+      .replace(/\n/g, '<br>');
+
+    const dateFormatted = new Date(meetingData.date).toLocaleDateString('fr-FR', {
+      day: 'numeric', month: 'long', year: 'numeric'
     });
 
-    // Email envoyé en arrière-plan après la réponse
-    sendEmailAsync(meetingData, analysis);
+    await resend.emails.send({
+      from: 'Jamie × Claude <onboarding@resend.dev>',
+      to: process.env.RECIPIENT_EMAIL,
+      subject: `📋 Analyse meeting : ${meetingData.title} — ${dateFormatted}`,
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 700px; margin: 0 auto; color: #333;">
+          <div style="background: #1a1a2e; padding: 24px; border-radius: 8px 8px 0 0;">
+            <h2 style="color: white; margin: 0;">📋 Analyse de meeting</h2>
+            <p style="color: #aaa; margin: 8px 0 0;">${meetingData.title} · ${dateFormatted}</p>
+          </div>
+          <div style="background: #f9f9f9; padding: 8px 24px; border-left: 4px solid #e0e0e0;">
+            <p style="margin: 8px 0; font-size: 13px; color: #666;">
+              👥 ${Array.isArray(meetingData.attendees) ? meetingData.attendees.join(', ') : (meetingData.attendees || 'Non renseigné')}
+              &nbsp;·&nbsp; ⏱️ ${meetingData.duration || 'Durée non renseignée'}
+              &nbsp;·&nbsp; 🗂️ Meeting #${loadHistory().length} en base
+            </p>
+          </div>
+          <div style="background: white; padding: 24px; border-radius: 0 0 8px 8px; border: 1px solid #e0e0e0;">
+            ${analysisHtml}
+          </div>
+          <p style="text-align: center; font-size: 11px; color: #bbb; margin-top: 16px;">
+            Généré automatiquement par Jamie × Claude Bridge · LIFE
+          </p>
+        </div>
+      `,
+    });
+    console.log('📧 Email envoyé via Resend à', process.env.RECIPIENT_EMAIL);
+  } catch (err) {
+    console.error('❌ Erreur email Resend:', err.message);
+  }
+}
+
+// ============================================================
+// WEBHOOK JAMIE — avec délai de 10 min pour laisser le temps
+// à Jamie de finaliser la transcription
+// ============================================================
+app.post('/webhook', async (req, res) => {
+  try {
+    const payload = req.body;
+    console.log('📩 Webhook reçu de Jamie:', JSON.stringify(payload).slice(0, 200));
+
+    // Répondre immédiatement à Jamie pour éviter un timeout
+    res.json({ success: true, message: 'Reçu ! Traitement dans 10 minutes.' });
+
+    // Attendre 10 minutes que Jamie finalise la transcription
+    const DELAY_MINUTES = 10;
+    console.log(`⏳ Attente de ${DELAY_MINUTES} min avant traitement...`);
+    await new Promise(resolve => setTimeout(resolve, DELAY_MINUTES * 60 * 1000));
+
+    console.log('🔄 Délai écoulé, lancement de l\'analyse...');
+    const result = await processMeeting(payload);
+    console.log('📊 Résultat:', result.success ? '✅ OK' : '❌ Erreur');
 
   } catch (error) {
-    console.error('❌ Erreur:', error.message);
+    console.error('❌ Erreur webhook:', error.message);
+  }
+});
+
+// ============================================================
+// ROUTE MANUELLE — pour relancer un meeting sans délai
+// Usage depuis Terminal :
+// curl -X POST https://jamie-claude-bridge-production.up.railway.app/manual \
+//   -H "Content-Type: application/json" \
+//   -H "x-jamie-api-key: TA_CLE_JAMIE" \
+//   -d '{"title":"Nom du meeting","summary":"...","transcript":"..."}'
+// ============================================================
+app.post('/manual', async (req, res) => {
+  try {
+    const payload = req.body;
+    console.log('🔧 Traitement manuel lancé pour:', payload.title || 'sans titre');
+
+    const result = await processMeeting(payload);
+    res.json(result);
+  } catch (error) {
+    console.error('❌ Erreur manuelle:', error.message);
     res.status(500).json({ success: false, error: error.message });
   }
 });
 
+// ============================================================
+// ROUTES UTILITAIRES
+// ============================================================
 app.get('/history', (req, res) => {
   const history = loadHistory();
-  res.json({ 
-    total: history.length, 
+  res.json({
+    total: history.length,
     meetings: history.map(m => ({ title: m.title, date: m.date, saved_at: m.saved_at }))
   });
 });
