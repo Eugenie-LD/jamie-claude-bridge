@@ -42,6 +42,47 @@ function saveToHistory(meeting) {
   return history;
 }
 
+// =============================================================
+// Extraire les données du meeting depuis le payload Jamie
+// Jamie envoie : { metadata: {...}, data: { title, startTime, 
+//   endTime, summary: { markdown, short }, transcript, ... } }
+// =============================================================
+function extractMeetingData(payload) {
+  // Jamie wraps everything in payload.data
+  const d = payload.data || payload;
+
+  // Titre
+  const title = d.title || d.meeting_title || d.name || 'Meeting sans titre';
+
+  // Date : Jamie envoie startTime / endTime
+  const date = d.startTime || d.date || d.created_at || new Date().toISOString();
+  const endTime = d.endTime || '';
+
+  // Durée : calculer à partir de startTime/endTime si possible
+  let duration = d.duration || '';
+  if (!duration && d.startTime && d.endTime) {
+    const diffMs = new Date(d.endTime) - new Date(d.startTime);
+    const diffMin = Math.round(diffMs / 60000);
+    duration = `${diffMin} min`;
+  }
+
+  // Transcript : Jamie envoie une string formatée
+  const transcript = d.transcript || d.transcription || d.content || '';
+
+  // Summary : Jamie envoie un objet { markdown, html, short }
+  let summary = '';
+  if (typeof d.summary === 'object' && d.summary !== null) {
+    summary = d.summary.markdown || d.summary.short || d.summary.html || '';
+  } else {
+    summary = d.summary || d.ai_summary || '';
+  }
+
+  // Participants
+  const attendees = d.attendees || d.participants || [];
+
+  return { title, date, endTime, duration, transcript, summary, attendees };
+}
+
 const LIFE_CONTEXT = `
 Tu es l'assistant marketing stratégique d'Eugénie, Strategic Marketing Lead chez LIFE, 
 une ONG française présente dans 25+ pays avec 4 piliers : 
@@ -60,18 +101,19 @@ Les donateurs sont appelés "LifeChangers".
 // Fonction qui traite le meeting (analyse Claude + email)
 async function processMeeting(payload) {
   try {
-    const meetingData = {
-      title: payload.title || payload.meeting_title || payload.name || 'Meeting sans titre',
-      date: payload.date || payload.created_at || new Date().toISOString(),
-      transcript: payload.transcript || payload.transcription || payload.content || '',
-      summary: payload.summary || payload.ai_summary || '',
-      attendees: payload.attendees || payload.participants || [],
-      duration: payload.duration || '',
-    };
+    const meetingData = extractMeetingData(payload);
+
+    // Log pour debug
+    console.log('📝 Meeting extrait:', {
+      title: meetingData.title,
+      duration: meetingData.duration,
+      summaryLength: meetingData.summary.length,
+      transcriptLength: meetingData.transcript.length,
+    });
 
     const history = loadHistory();
     const recentMeetings = history.slice(-5).map(m =>
-      `[${m.date?.slice(0, 10)}] ${m.title}: ${m.summary?.slice(0, 300) || 'pas de résumé'}`
+      `[${m.date?.slice(0, 10)}] ${m.title}: ${(m.summary || '').slice(0, 300) || 'pas de résumé'}`
     ).join('\n');
 
     saveToHistory(meetingData);
@@ -91,10 +133,10 @@ ${recentMeetings || 'Aucun historique encore.'}
 **Durée :** ${meetingData.duration}
 
 **Résumé Jamie :**
-${meetingData.summary}
+${meetingData.summary.slice(0, 6000) || 'Non disponible'}
 
 **Transcript :**
-${meetingData.transcript?.slice(0, 8000) || 'Non disponible'}
+${meetingData.transcript.slice(0, 8000) || 'Non disponible'}
 
 ---
 
@@ -188,7 +230,14 @@ async function sendEmail(meetingData, analysis) {
 app.post('/webhook', async (req, res) => {
   try {
     const payload = req.body;
-    console.log('📩 Webhook reçu de Jamie:', JSON.stringify(payload).slice(0, 200));
+    const meetingTitle = payload?.data?.title || payload?.title || 'sans titre';
+    console.log('📩 Webhook reçu de Jamie:', meetingTitle);
+    console.log('📦 Payload keys:', Object.keys(payload));
+    if (payload.data) {
+      console.log('📦 Data keys:', Object.keys(payload.data));
+      console.log('📦 Summary type:', typeof payload.data.summary);
+      console.log('📦 Transcript length:', (payload.data.transcript || '').length);
+    }
 
     // Répondre immédiatement à Jamie pour éviter un timeout
     res.json({ success: true, message: 'Reçu ! Traitement dans 10 minutes.' });
@@ -209,16 +258,13 @@ app.post('/webhook', async (req, res) => {
 
 // ============================================================
 // ROUTE MANUELLE — pour relancer un meeting sans délai
-// Usage depuis Terminal :
-// curl -X POST https://jamie-claude-bridge-production.up.railway.app/manual \
-//   -H "Content-Type: application/json" \
-//   -H "x-jamie-api-key: TA_CLE_JAMIE" \
-//   -d '{"title":"Nom du meeting","summary":"...","transcript":"..."}'
+// Accepte soit le format Jamie brut, soit un format simplifié
 // ============================================================
 app.post('/manual', async (req, res) => {
   try {
     const payload = req.body;
-    console.log('🔧 Traitement manuel lancé pour:', payload.title || 'sans titre');
+    const meetingTitle = payload?.data?.title || payload?.title || 'sans titre';
+    console.log('🔧 Traitement manuel lancé pour:', meetingTitle);
 
     const result = await processMeeting(payload);
     res.json(result);
